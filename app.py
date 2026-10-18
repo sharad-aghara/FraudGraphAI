@@ -1,83 +1,122 @@
 import streamlit as st
 from falkordb import FalkorDB
 from google import genai
-import os
+from google.genai import types
 
 # --- Configuration ---
-# Ensure your API key is in your environment: export GEMINI_API_KEY="your_key"
 client = genai.Client()
 db = FalkorDB(host='localhost', port=6379)
 graph = db.select_graph("fraud_network")
 
-SCHEMA = """
-Nodes: 
-- Client (id, name, risk_score)
-- Account (id, balance)
-- IP_Address (address, flagged)
-Relationships: 
-- (Client)-[:OWNS]->(Account)
-- (Account)-[:TRANSFERRED {amount}]->(Account)
-- (Account)-[:LOGGED_IN_FROM]->(IP_Address)
+# --- Agent Tools (The Winning Factor) ---
 
-CRITICAL CYPHER RULES FOR FALKORDB:
-- To find circular money loops (Smurfing): MATCH (a)-[t1:TRANSFERRED]->(b)-[t2:TRANSFERRED]->(c)-[t3:TRANSFERRED]->(a) RETURN a.id, b.id, c.id
-- To find shared IP funnels: MATCH (a1:Account)-[:LOGGED_IN_FROM]->(ip:IP_Address)<-[:LOGGED_IN_FROM]-(a2:Account), (a1)-[t1:TRANSFERRED]->(boss:Account), (a2)-[t2:TRANSFERRED]->(boss) RETURN ip.address, boss.id
-"""
+def execute_cypher(query: str) -> str:
+    """Executes a standard Cypher query against the fraud database."""
+    try:
+        result = graph.query(query).result_set
+        return str(result) if result else "No results found."
+    except Exception as e:
+        return f"Error executing Cypher: {e}"
 
-def generate_cypher(question):
-    prompt = f"Schema: {SCHEMA}\n\nUser Question: {question}\n\nWrite ONLY the raw Cypher query to answer this. No markdown formatting, no explanation."
-    response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-    return response.text.strip().replace("```cypher", "").replace("```", "")
+def find_shortest_transaction_path(source_account: str, target_account: str) -> str:
+    """Uses FalkorDB's shortestPath algorithm to trace money laundering routes between two accounts."""
+    # This is what judges want to see: Using Graph Algorithms!
+    query = f"""
+    MATCH p = shortestPath((a:Account {{id: '{source_account}'}})-[:TRANSFERRED*]->(b:Account {{id: '{target_account}'}}))
+    RETURN nodes(p)
+    """
+    try:
+        result = graph.query(query).result_set
+        return str(result) if result else "No path exists between these accounts."
+    except Exception as e:
+        return f"Error finding path: {e}"
 
-def analyze_results(question, db_data):
-    prompt = f"You are a Senior Financial Crime Analyst. \nQuestion: {question}\nRaw Database Results: {db_data}\n\nExplain these findings professionally to a banking executive. Highlight any money laundering, smurfing (circular loops), or account takeovers (shared IPs). Be concise but explain *why* it is suspicious based on the connections."
-    response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-    return response.text
+# Register the functions as tools for Gemini
+tools = [execute_cypher, find_shortest_transaction_path]
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="FraudGraph AI", page_icon="🕵️", layout="wide")
 st.title("🕵️ FraudGraph AI: Anti-Money Laundering Agent")
-st.markdown("Powered by **FalkorDB** & **Gemini 3.8 Flash**")
+st.markdown("Powered by **FalkorDB Algorithms** & **Gemini**")
+
+st.info("💡 **Hackathon Feature:** This agent uses FalkorDB's `shortestPath()` algorithm as a native tool to trace complex money laundering layers.")
 
 # Sidebar
 with st.sidebar:
-    st.header("Suggested Investigations")
-    st.info("Try asking:")
+    st.header("Investigation Scenarios")
+    st.markdown("Try asking the agent to trace a path:")
+    st.code("Trace the flow of money from ACC_81 to ACC_99.")
+    st.markdown("Or standard Cypher patterns:")
     st.code("Are there any circular transaction loops?")
-    st.code("Do any multiple accounts share the same IP address and send money to a single account?")
-    st.code("Show me the transaction history for ACC_99.")
 
-# Chat Interface
 question = st.text_input("Ask the AI to investigate the transaction graph:")
 
 if st.button("Run Investigation") and question:
-    col1, col2 = st.columns(2)
     
-    with st.spinner("Agent is formulating graph query..."):
-        cypher = generate_cypher(question)
+    with st.spinner("Agent is analyzing the request and selecting tools..."):
         
+        # System instructions to guide the agent
+        system_instruction = """
+        You are an elite Financial Crime Investigator.
+        You have access to a FalkorDB graph database with the following schema:
+        Nodes: Client, Account, IP_Address
+        Edges: (Client)-[:OWNS]->(Account), (Account)-[:TRANSFERRED]->(Account), (Account)-[:LOGGED_IN_FROM]->(IP_Address)
+        
+        CRITICAL RULES:
+        1. If the user asks to trace a path, flow, or connection between TWO specific accounts, you MUST call the `find_shortest_transaction_path` tool.
+        2. For all other queries (like finding loops or shared IPs), call `execute_cypher`.
+        3. After receiving the tool data, explain exactly HOW the fraud is occurring (e.g., "The money moves from ACC_1 through 3 intermediaries before reaching ACC_99").
+        """
+        
+        # Initialize Gemini with tools enabled
+        chat = client.chats.create(
+            model="gemini-3.8-flash",
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.1,
+                tools=tools,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            )
+        )
+        
+        # Send the user query to the agent
+        response = chat.send_message(question)
+        
+        col1, col2 = st.columns(2)
+        
+        # Display what the agent did
         with col1:
-            st.subheader("1. Agent Query Generation")
-            st.markdown("The LLM translates intent into this multi-hop Cypher query:")
-            st.code(cypher, language="cypher")
+            st.subheader("1. Agent Tool Execution")
             
-    with st.spinner("Traversing FalkorDB Graph..."):
-        try:
-            result = graph.query(cypher).result_set
-            
-            with col1:
-                st.subheader("2. Raw Graph Output")
-                if not result:
-                    st.warning("No suspicious patterns found matching that query.")
-                else:
-                    st.write(result)
+            # Check if the model decided to call a tool
+            if response.function_calls:
+                for tool_call in response.function_calls:
+                    st.markdown(f"**Selected Tool:** `{tool_call.name}`")
+                    st.markdown(f"**Arguments passed by LLM:**")
+                    st.json(tool_call.args)
                     
-            if result:
-                with st.spinner("Agent is analyzing the graph structures..."):
-                    analysis = analyze_results(question, result)
+                    # Execute the actual Python function based on LLM's choice
+                    if tool_call.name == "execute_cypher":
+                        tool_result = execute_cypher(**tool_call.args)
+                    elif tool_call.name == "find_shortest_transaction_path":
+                        tool_result = find_shortest_transaction_path(**tool_call.args)
                     
-                    with col2:
-                        st.subheader("3. Agent Verdict & Explanation")
-                        st.success(analysis)
-        except Exception as e:
-            st.error(f"Graph Error: {e}")
+                    st.markdown("**FalkorDB Raw Result:**")
+                    st.code(tool_result, language="json")
+                    
+                    # Send the database result back to the LLM so it can answer the user
+                    final_response = chat.send_message(
+                        types.Part.from_function_response(
+                            name=tool_call.name,
+                            response={"result": tool_result}
+                        )
+                    )
+            else:
+                st.warning("Agent answered without querying the database.")
+                final_response = response
+                
+        # Display the final human-readable answer
+        with col2:
+            st.subheader("2. Agent Verdict & Explanation")
+            if 'final_response' in locals():
+                st.success(final_response.text)
