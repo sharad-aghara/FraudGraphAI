@@ -8,7 +8,7 @@ client = genai.Client()
 db = FalkorDB(host='localhost', port=6379)
 graph = db.select_graph("fraud_network")
 
-# --- Agent Tools (The Winning Factor) ---
+# --- Agent Tools ---
 
 def execute_cypher(query: str) -> str:
     """Executes a standard Cypher query against the fraud database."""
@@ -19,15 +19,30 @@ def execute_cypher(query: str) -> str:
         return f"Error executing Cypher: {e}"
 
 def find_shortest_transaction_path(source_account: str, target_account: str) -> str:
-    """Uses FalkorDB's shortestPath algorithm to trace money laundering routes between two accounts."""
-    # This is what judges want to see: Using Graph Algorithms!
+    """Uses FalkorDB's shortestPath algorithm to trace money laundering routes."""
     query = f"""
-    MATCH p = shortestPath((a:Account {{id: '{source_account}'}})-[:TRANSFERRED*]->(b:Account {{id: '{target_account}'}}))
-    RETURN nodes(p)
+    MATCH (a:Account {{id: '{source_account}'}}), (b:Account {{id: '{target_account}'}})
+    RETURN shortestPath((a)-[:TRANSFERRED*]->(b))
     """
     try:
         result = graph.query(query).result_set
-        return str(result) if result else "No path exists between these accounts."
+
+        print("result: ", result)
+        
+        if not result or not result[0] or not result[0][0]:
+            return "No path exists between these accounts."
+            
+        # Extract the Path object
+        path_obj = result[0][0]
+        
+        # Unpack the nodes from the path and get their IDs
+        account_path = [node.properties.get('id', 'Unknown') for node in path_obj.nodes()]
+        
+        # Format it into a clean string for the LLM (e.g., "ACC_81 -> ACC_99")
+        readable_path = " -> ".join(account_path)
+        
+        return f"Suspicious Path Found: {readable_path}"
+        
     except Exception as e:
         return f"Error finding path: {e}"
 
@@ -39,13 +54,13 @@ st.set_page_config(page_title="FraudGraph AI", page_icon="🕵️", layout="wide
 st.title("🕵️ FraudGraph AI: Anti-Money Laundering Agent")
 st.markdown("Powered by **FalkorDB Algorithms** & **Gemini**")
 
-st.info("💡 **Hackathon Feature:** This agent uses FalkorDB's `shortestPath()` algorithm as a native tool to trace complex money laundering layers.")
+st.info("💡 **Feature:** This agent uses FalkorDB's `shortestPath()` algorithm as a native tool to trace complex money laundering layers.")
 
 # Sidebar
 with st.sidebar:
     st.header("Investigation Scenarios")
     st.markdown("Try asking the agent to trace a path:")
-    st.code("Trace the flow of money from ACC_81 to ACC_99.")
+    st.code("Trace the flow of money of ACC_1 to ACC_19.")
     st.markdown("Or standard Cypher patterns:")
     st.code("Are there any circular transaction loops?")
 
@@ -72,8 +87,7 @@ if st.button("Run Investigation") and question:
         WHERE a.id = d.id AND a.id <> b.id AND b.id <> c.id
         RETURN a.id, b.id, c.id, t1.amount, t2.amount, t3.amount LIMIT 10
            
-        4. SHORTEST PATH TOOL: To trace a flow between TWO specific accounts, you MUST call the `find_shortest_transaction_path` tool. 
-           (Note: Do not generate Cypher for shortest path, just call the tool).
+        4. SHORTEST PATH TOOL: To trace a flow between TWO specific accounts, you MUST call the `find_shortest_transaction_path` tool. (Note: Do not generate Cypher for shortest path, just call the tool).
            
         5. EMPTY RESULTS: If the tool returns an empty list `[]` or "No results found", inform the user that the requested entity or pattern does not exist in the current graph context. Do not hallucinate data.
 
@@ -119,12 +133,14 @@ if st.button("Run Investigation") and question:
                     st.code(tool_result, language="json")
                     
                     # Send tool result back to Gemini
-                    final_response = chat.send_message(
+                    # Send tool result back to Gemini AND explicitly tell it to analyze it
+                    final_response = chat.send_message([
                         types.Part.from_function_response(
                             name=tool_call.name,
                             response={"result": tool_result}
-                        )
-                    )
+                        ),
+                        "Analyze this tool result and explain the findings clearly to the user."
+                    ])
             else:
                 final_response = response
                 
