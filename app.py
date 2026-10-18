@@ -134,19 +134,22 @@ if st.button("Run Investigation") and question:
                     
                     # Send tool result back to Gemini
                     # Send tool result back to Gemini AND explicitly tell it to analyze it
-                    final_response = chat.send_message([
+                    final_response = chat.send_message(
                         types.Part.from_function_response(
                             name=tool_call.name,
                             response={"result": tool_result}
-                        ),
-                        "Analyze this tool result and explain the findings clearly to the user."
-                    ])
+                        )
+                    )
+
+                    final_response = chat.send_message(
+                        "Analyze this tool result and explain the findings clearly to the user as a financial crime analyst."
+                    )
             else:
                 final_response = response
                 
         with col2:
             st.subheader("2. Agent Verdict & Explanation")
-            if final_response and final_response.text:
+            if final_response and getattr(final_response, "text", None):
                 st.success(final_response.text)
             else:
                 st.warning("Agent could not generate a textual explanation.")
