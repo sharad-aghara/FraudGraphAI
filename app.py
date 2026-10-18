@@ -62,15 +62,30 @@ if st.button("Run Investigation") and question:
         Nodes: Client, Account, IP_Address
         Edges: (Client)-[:OWNS]->(Account), (Account)-[:TRANSFERRED]->(Account), (Account)-[:LOGGED_IN_FROM]->(IP_Address)
         
-        CRITICAL RULES:
-        1. If the user asks to trace a path, flow, or connection between TWO specific accounts, you MUST call the `find_shortest_transaction_path` tool.
-        2. For all other queries (like finding loops or shared IPs), call `execute_cypher`.
-        3. After receiving the tool data, explain exactly HOW the fraud is occurring (e.g., "The money moves from ACC_1 through 3 intermediaries before reaching ACC_99").
+        CRITICAL FALKORDB CYPHER RULES:
+        1. NEVER use functions like `str()`, `coalesce()`, `nodes(path)`, `relationships(path)`, or list comprehensions like `[n in nodes...]`. 
+        
+        2. SAFETY LIMITS: ALWAYS append `LIMIT 50` to any `MATCH` query returning nodes or relationships, unless the user is specifically asking for a `count()`.
+        
+        3. CIRCULAR LOOPS (Smurfing): To find circular money loops, use this exact syntax:
+        MATCH (a:Account)-[t1:TRANSFERRED]->(b:Account)-[t2:TRANSFERRED]->(c:Account)-[t3:TRANSFERRED]->(d:Account)
+        WHERE a.id = d.id AND a.id <> b.id AND b.id <> c.id
+        RETURN a.id, b.id, c.id, t1.amount, t2.amount, t3.amount LIMIT 10
+           
+        4. SHORTEST PATH TOOL: To trace a flow between TWO specific accounts, you MUST call the `find_shortest_transaction_path` tool. 
+           (Note: Do not generate Cypher for shortest path, just call the tool).
+           
+        5. EMPTY RESULTS: If the tool returns an empty list `[]` or "No results found", inform the user that the requested entity or pattern does not exist in the current graph context. Do not hallucinate data.
+
+        6. AGGREGATIONS: You can use standard Cypher aggregations to find anomalies (e.g., `MATCH (a:Account)-[:LOGGED_IN_FROM]->(ip:IP_Address) RETURN ip.address, count(a) AS acc_count ORDER BY acc_count DESC LIMIT 5`).
+        
+        For all queries other than shortest path, call `execute_cypher`.
+        After receiving the database results, explain the findings clearly to a banking executive.
         """
         
         # Initialize Gemini with tools enabled
         chat = client.chats.create(
-            model="gemini-3.8-flash",
+            model="gemini-3.5-flash",
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.1,
@@ -95,7 +110,6 @@ if st.button("Run Investigation") and question:
                     st.markdown(f"**Arguments passed by LLM:**")
                     st.json(tool_call.args)
                     
-                    # Execute the actual Python function based on LLM's choice
                     if tool_call.name == "execute_cypher":
                         tool_result = execute_cypher(**tool_call.args)
                     elif tool_call.name == "find_shortest_transaction_path":
@@ -104,7 +118,7 @@ if st.button("Run Investigation") and question:
                     st.markdown("**FalkorDB Raw Result:**")
                     st.code(tool_result, language="json")
                     
-                    # Send the database result back to the LLM so it can answer the user
+                    # Send tool result back to Gemini
                     final_response = chat.send_message(
                         types.Part.from_function_response(
                             name=tool_call.name,
@@ -112,11 +126,11 @@ if st.button("Run Investigation") and question:
                         )
                     )
             else:
-                st.warning("Agent answered without querying the database.")
                 final_response = response
                 
-        # Display the final human-readable answer
         with col2:
             st.subheader("2. Agent Verdict & Explanation")
-            if 'final_response' in locals():
+            if final_response and final_response.text:
                 st.success(final_response.text)
+            else:
+                st.warning("Agent could not generate a textual explanation.")
